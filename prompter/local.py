@@ -1,4 +1,8 @@
-"""Reference backend: run commands through the local ``/bin/sh``."""
+"""Reference backend: each line runs in a fresh local ``/bin/sh``.
+
+``cd`` and ``export`` are builtins because they must outlive the subprocess.
+``$PATH`` is scanned once in a background thread; ``rehash`` rescans.
+"""
 
 from __future__ import annotations
 
@@ -10,272 +14,116 @@ import socket
 import threading
 from collections.abc import Callable, Mapping
 from pathlib import Path
-from time import monotonic
 
-from prompter.backend import Backend, PathEntry, Writer
+from prompter.console import Backend, Writer
 
-_CHUNK = 4096
-
-
-def _scan_directory(directory: str) -> frozenset[str]:
-    names: set[str] = set()
-    try:
-        with os.scandir(directory) as entries:
-            for entry in entries:
-                if entry.is_file() and os.access(entry.path, os.X_OK):
-                    names.add(entry.name)
-    except OSError:
-        pass
-    return frozenset(names)
-
-
-class CommandIndex:
-    """Executables on ``$PATH``, maintained by a background thread.
-
-    Scanning must never happen on the render path: on WSL a single Windows
-    directory under ``/mnt/c`` takes well over a second to list. Directories
-    are rescanned only when their mtime changes, and results are published
-    incrementally so fast local directories show up immediately.
-    """
-
-    REFRESH_INTERVAL = 5.0
-
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._dirs: dict[str, tuple[float, frozenset[str]]] = {}
-        self._names: frozenset[str] = frozenset()
-        self._path: str | None = None
-        self._refreshed_at = -self.REFRESH_INTERVAL
-        self._thread: threading.Thread | None = None
-        self.ready = False
-
-    def names(self, path: str) -> frozenset[str]:
-        """Current snapshot; may be incomplete until :attr:`ready` is set."""
-        self.refresh(path)
-        return self._names
-
-    def refresh(self, path: str, force: bool = False) -> None:
-        with self._lock:
-            if self._thread is not None and self._thread.is_alive():
-                return
-            fresh = path == self._path and monotonic() - self._refreshed_at < self.REFRESH_INTERVAL
-            if fresh and not force:
-                return
-            self._thread = threading.Thread(
-                target=self._refresh, args=(path, force), daemon=True, name="prompter-path"
-            )
-            self._thread.start()
-
-    def wait(self, timeout: float | None = None) -> None:
-        if self._thread is not None:
-            self._thread.join(timeout)
-
-    def _refresh(self, path: str, force: bool) -> None:
-        directories = [d or "." for d in path.split(os.pathsep)]
-        for directory in directories:
-            try:
-                mtime = os.stat(directory).st_mtime
-            except OSError:
-                self._dirs.pop(directory, None)
-                continue
-            cached = self._dirs.get(directory)
-            if cached is not None and cached[0] == mtime and not force:
-                continue
-            self._dirs[directory] = (mtime, _scan_directory(directory))
-            self._publish(directories)
-        for stale in set(self._dirs) - set(directories):
-            del self._dirs[stale]
-        self._publish(directories)
-        with self._lock:
-            self._path = path
-            self._refreshed_at = monotonic()
-            self.ready = True
-
-    def _publish(self, directories: list[str]) -> None:
-        names: set[str] = set()
-        for directory in directories:
-            if (cached := self._dirs.get(directory)) is not None:
-                names |= cached[1]
-        self._names = frozenset(names)
-
-
-Builtin = Callable[["LocalShell", list[str]], int]
+Builtin = Callable[[list[str], Writer], int]
 
 
 class LocalShell(Backend):
-    """Each line runs in a fresh ``/bin/sh``; cwd and environment persist here.
-
-    Things that cannot be subprocesses (``cd``, ``export``...) are builtins.
-    """
-
     host = socket.gethostname().split(".")[0]
-    windows = False
+    home: str
+    env: dict[str, str]
 
-    def __init__(
-        self,
-        cwd: str | os.PathLike[str] | None = None,
-        env: Mapping[str, str] | None = None,
-        stderr: Writer | None = None,
-    ) -> None:
-        self._cwd = Path(cwd) if cwd is not None else Path.cwd()
-        self._env = dict(os.environ if env is None else env)
-        self._error = stderr or (lambda text: None)
-        self._index = CommandIndex()
-        self._builtins: dict[str, Builtin] = {
-            "cd": LocalShell._cd,
-            "export": LocalShell._export,
-            "unset": LocalShell._unset,
-            "rehash": LocalShell._rehash,
+    def __init__(self, cwd: str | None = None, env: Mapping[str, str] | None = None) -> None:
+        self.cwd = cwd or os.getcwd()
+        self.env = dict(os.environ if env is None else env)
+        self.home = self.env.get("HOME") or str(Path.home())
+        self.builtins: dict[str, Builtin] = {
+            "cd": self.cd,
+            "export": self.export,
+            "rehash": self.rehash,
         }
+        self.rehash()
 
-    @property
-    def cwd(self) -> str:
-        return str(self._cwd)
+    # -- commands -------------------------------------------------------------
 
-    @property
-    def home(self) -> str | None:
-        return self._env.get("HOME") or str(Path.home())
+    def rehash(self, *_: object) -> int:
+        self.scanner = threading.Thread(target=self._scan_path, daemon=True)
+        self.scanner.start()
+        return 0
 
-    @property
-    def env(self) -> Mapping[str, str]:
-        return self._env
+    def _scan_path(self) -> None:
+        names = set(self.builtins)
+        for directory in self.env.get("PATH", os.defpath).split(os.pathsep):
+            try:
+                with os.scandir(directory or ".") as entries:
+                    names |= {e.name for e in entries if os.access(e.path, os.X_OK) and e.is_file()}
+            except OSError:
+                continue
+            self.commands = frozenset(names)  # publish incrementally; slow dirs (WSL) come last
 
-    @property
-    def path(self) -> str:
-        return self._env.get("PATH", os.defpath)
+    # -- paths ----------------------------------------------------------------
 
-    # -- commands -----------------------------------------------------------
+    def expand(self, path: str) -> str:
+        return self.home + path[1:] if path == "~" or path.startswith("~/") else path
 
-    def commands(self) -> frozenset[str] | None:
-        return self._index.names(self.path) | frozenset(self._builtins)
+    async def complete_path(self, prefix: str, only_dirs: bool) -> list[str]:
+        return await asyncio.to_thread(self._complete_path, prefix, only_dirs)
 
-    def is_command(self, name: str) -> bool | None:
-        if name in self._builtins or name in self._index.names(self.path):
-            return True
-        if "/" in name:
-            candidate = self._cwd / self._expanduser(name)
-            return candidate.is_file() and os.access(candidate, os.X_OK)
-        return False if self._index.ready else None
-
-    def describe(self, command: str) -> str | None:
-        return "builtin" if command in self._builtins else None
-
-    def refresh(self) -> None:
-        self._index.refresh(self.path)
-
-    def wait_for_index(self, timeout: float | None = None) -> None:
-        self._index.wait(timeout)
-
-    # -- paths --------------------------------------------------------------
-
-    async def complete_path(self, prefix: str, only_directories: bool) -> list[PathEntry]:
-        return await asyncio.to_thread(self._complete_path, prefix, only_directories)
-
-    def _expanduser(self, path: str) -> str:
-        if path == "~" or path.startswith("~/"):
-            return (self.home or "~") + path[1:]
-        return path
-
-    def _complete_path(self, prefix: str, only_directories: bool) -> list[PathEntry]:
-        directory, partial = os.path.split(self._expanduser(prefix))
-        head = prefix[: len(prefix) - len(partial)]
+    def _complete_path(self, prefix: str, only_dirs: bool) -> list[str]:
+        head, partial = os.path.split(self.expand(prefix))
         try:
-            with os.scandir(self._cwd / directory if directory else self._cwd) as it:
+            with os.scandir(os.path.join(self.cwd, head)) as it:
                 entries = sorted(it, key=lambda e: e.name)
         except OSError:
             return []
-        results: list[PathEntry] = []
-        for entry in entries:
-            if not entry.name.startswith(partial):
-                continue
-            if not partial and entry.name.startswith("."):
-                continue
-            is_dir = entry.is_dir()
-            if only_directories and not is_dir:
-                continue
-            results.append(PathEntry(head + entry.name + ("/" if is_dir else ""), is_dir))
-        return results
+        typed = prefix[: len(prefix) - len(partial)]
+        return [
+            typed + e.name + ("/" if e.is_dir() else "")
+            for e in entries
+            if e.name.startswith(partial)
+            and (partial or not e.name.startswith("."))
+            and (e.is_dir() or not only_dirs)
+        ]
 
-    # -- execution ----------------------------------------------------------
+    # -- execution ------------------------------------------------------------
 
     async def run(self, line: str, stdout: Writer, stderr: Writer) -> int:
         try:
             words = shlex.split(line)
         except ValueError:
             words = line.split()
-        if words and words[0] in self._builtins:
-            self._error = stderr
-            return self._builtins[words[0]](self, words[1:])
-        return await self._run_in_sh(line, stdout, stderr)
+        if words and words[0] in self.builtins:
+            return self.builtins[words[0]](words[1:], stderr)
 
-    async def _run_in_sh(self, line: str, stdout: Writer, stderr: Writer) -> int:
         proc = await asyncio.create_subprocess_shell(
-            line,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=self._cwd,
-            env=self._env,
-            executable="/bin/sh",
-        )
-        # The terminal delivers Ctrl-C to the whole foreground process group, so
-        # the child already receives it; we only stop it from killing the shell.
+            line, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            cwd=self.cwd, env=self.env, executable="/bin/sh",
+        )  # fmt: skip
+        # Ctrl-C reaches the child via the foreground process group; just don't let it kill us.
         previous = signal.signal(signal.SIGINT, lambda *_: None)
         try:
             await asyncio.gather(
-                _pump(proc.stdout, stdout),
-                _pump(proc.stderr, stderr),
-                proc.wait(),
+                _pump(proc.stdout, stdout), _pump(proc.stderr, stderr), proc.wait()
             )
         finally:
             signal.signal(signal.SIGINT, previous)
+        code = proc.returncode or 0
+        return 128 - code if code < 0 else code
 
-        returncode = proc.returncode or 0
-        return 128 - returncode if returncode < 0 else returncode
+    # -- builtins -------------------------------------------------------------
 
-    # -- builtins -----------------------------------------------------------
-
-    def _cd(self, args: list[str]) -> int:
-        if len(args) > 1:
-            self._error("cd: too many arguments\n")
+    def cd(self, args: list[str], stderr: Writer) -> int:
+        target = (
+            self.env.get("OLDPWD", self.cwd)
+            if args == ["-"]
+            else self.expand(args[0] if args else "~")
+        )
+        destination = os.path.realpath(os.path.join(self.cwd, target))
+        if not os.path.isdir(destination):
+            stderr(f"cd: no such directory: {target}\n")
             return 1
-        target = args[0] if args else "~"
-        if target == "-":
-            target = self._env.get("OLDPWD", str(self._cwd))
-        destination = (self._cwd / self._expanduser(target)).resolve()
-        if not destination.is_dir():
-            self._error(f"cd: no such directory: {target}\n")
-            return 1
-        self._env["OLDPWD"] = str(self._cwd)
-        self._cwd = destination
-        self._env["PWD"] = str(destination)
+        self.env["OLDPWD"], self.cwd, self.env["PWD"] = self.cwd, destination, destination
         return 0
 
-    def _export(self, args: list[str]) -> int:
-        if not args:
-            for key, value in sorted(self._env.items()):
-                print(f"{key}={value}")
-            return 0
+    def export(self, args: list[str], stderr: Writer) -> int:
         for arg in args:
-            key, sep, value = arg.partition("=")
-            if sep:
-                self._env[key] = value
-            elif key not in self._env:
-                self._error(f"export: {key} is not set\n")
-                return 1
-        return 0
-
-    def _unset(self, args: list[str]) -> int:
-        for key in args:
-            self._env.pop(key, None)
-        return 0
-
-    def _rehash(self, args: list[str]) -> int:
-        self._index.refresh(self.path, force=True)
+            key, _, value = arg.partition("=")
+            self.env[key] = value
         return 0
 
 
 async def _pump(stream: asyncio.StreamReader | None, write: Writer) -> None:
-    if stream is None:
-        return
-    while chunk := await stream.read(_CHUNK):
+    while stream and (chunk := await stream.read(4096)):
         write(chunk.decode(errors="replace"))

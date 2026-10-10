@@ -1,37 +1,21 @@
-"""Shared fixtures. ``FakeBackend`` shows the minimum a custom backend needs."""
-
-from __future__ import annotations
-
-from collections.abc import Mapping
+"""``FakeBackend`` is the minimum a custom backend needs: a pretend Windows appliance."""
 
 import pytest
 
-from prompter.backend import Backend, PathEntry, Writer
+from prompter.console import Backend, Writer
 
 
 class FakeBackend(Backend):
-    """A pretend Windows appliance with a fixed command set and no filesystem access."""
-
     host = "appliance"
-    windows = True
+    sep = "\\"
+    cwd = r"C:\Users\Mike\dev\prompter"
+    home = r"C:\Users\Mike"
 
     def __init__(self) -> None:
+        self.env = {"HOME": self.home, "HOSTNAME": self.host}
+        self.commands = {"deploy": "push a release", "status": "health check", "show": ""}
         self.ran: list[str] = []
         self.status = 0
-        self._cwd = r"C:\Users\Mike\dev\prompter"
-        self._env: dict[str, str] = {"HOME": r"C:\Users\Mike"}
-
-    @property
-    def cwd(self) -> str:
-        return self._cwd
-
-    @property
-    def home(self) -> str | None:
-        return self._env.get("HOME")
-
-    @property
-    def env(self) -> Mapping[str, str]:
-        return self._env
 
     async def run(self, line: str, stdout: Writer, stderr: Writer) -> int:
         self.ran.append(line)
@@ -40,16 +24,7 @@ class FakeBackend(Backend):
             stderr("failed\n")
         return self.status
 
-    def commands(self) -> frozenset[str] | None:
-        return frozenset({"deploy", "status", "show"})
-
-    def describe(self, command: str) -> str | None:
-        return {"deploy": "push a release", "status": "health check"}.get(command)
-
-    async def complete_path(self, prefix: str, only_directories: bool) -> list[PathEntry] | None:
-        return None
-
 
 @pytest.fixture
-def fake_backend() -> FakeBackend:
+def fake() -> FakeBackend:
     return FakeBackend()
