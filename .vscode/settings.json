@@ -1,0 +1,4 @@
+{
+    "python.defaultInterpreterPath": "${workspaceFolder}/prompter-venv/bin/python",
+    "makefile.configureOnOpen": false
+}

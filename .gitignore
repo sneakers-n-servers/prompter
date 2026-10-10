@@ -1,0 +1,4 @@
+__pycache__/
+/prompter-venv.ruff_cache/
+.mypy_cache/
+.pytest_cache/
