@@ -11,7 +11,7 @@ from prompt_toolkit.styles import Style
 STYLES: dict[str, dict[str, str]] = {
     "batman": {"green": "#33aa55", "fg": "#aaaaaa", "bg": "#1c1c1c", "grey": "#666666", "red": "#cc0000", "yellow": "#ffaa00", "blue": "#3366ff", "magenta": "#ff0066"},
     "zenburn": {"green": "#60b48a", "fg": "#dcdccc", "bg": "#3f3f3f", "grey": "#709080", "red": "#dca3a3", "yellow": "#f0dfaf", "blue": "#94bff3", "magenta": "#ec93d3"},
-    "nord": {"green": "#a3be8c", "fg": "#d8dee9", "bg": "#2e3440", "grey": "#4c566a", "red": "#bf616a", "yellow": "#ebcb8b", "blue": "#81a1c1", "magenta": "#b48ead"},
+    "nord": {"green": "#a3be8c", "fg": "#d8dee9", "bg": "#2e3440", "grey": "#616e88", "red": "#bf616a", "yellow": "#ebcb8b", "blue": "#81a1c1", "magenta": "#b48ead"},
     "dracula": {"green": "#50fa7b", "fg": "#f8f8f2", "bg": "#282a36", "grey": "#6272a4", "red": "#ff5555", "yellow": "#f1fa8c", "blue": "#bd93f9", "magenta": "#ff79c6"},
     "gruvbox": {"green": "#b8bb26", "fg": "#ebdbb2", "bg": "#282828", "grey": "#928374", "red": "#fb4934", "yellow": "#fabd2f", "blue": "#83a598", "magenta": "#d3869b"},
     "solarized": {"green": "#859900", "fg": "#839496", "bg": "#002b36", "grey": "#586e75", "red": "#dc322f", "yellow": "#b58900", "blue": "#268bd2", "magenta": "#d33682"},
@@ -23,7 +23,10 @@ BASE_RULES = {
     "auto-suggestion": "{grey}",
     "bottom-toolbar": "bg:{bg} {grey} noreverse",
     "completion-menu": "bg:{bg} {fg}",
-    "completion-menu.meta.completion": "bg:{bg:150} {grey}",
+    "completion-menu.meta.completion": "bg:{bg:75} {grey}",
+    "completion-menu.multi-column-meta": "bg:{bg:75} {grey}",
+    "scrollbar.background": "bg:{bg:75}",
+    "scrollbar.button": "bg:{grey}",
     "lexer.comment": "{grey} italic",
 }
 
@@ -45,7 +48,7 @@ PROMPT_RULES = {
         "bottom-toolbar.key": "{yellow} bold",
         "bottom-toolbar.sep": "{blue}",
         "completion-menu.completion.current": "bg:{yellow} {bg} bold",
-        "completion-menu.meta.completion.current": "bg:{yellow} {bg:150}",
+        "completion-menu.meta.completion.current": "bg:{yellow} {bg}",
         "lexer.command.valid": "{yellow} bold",
         "lexer.command.invalid": "{magenta} bold",
         "lexer.option": "{blue}",
@@ -65,7 +68,7 @@ PROMPT_RULES = {
         "bottom-toolbar.key": "{magenta}",
         "bottom-toolbar.sep": "{grey}",
         "completion-menu.completion.current": "bg:{magenta} {bg}",
-        "completion-menu.meta.completion.current": "bg:{magenta} {bg:150}",
+        "completion-menu.meta.completion.current": "bg:{magenta} {bg}",
         "lexer.command.valid": "{green}",
         "lexer.command.invalid": "{red}",
         "lexer.option": "{fg}",
