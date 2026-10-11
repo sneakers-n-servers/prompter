@@ -22,7 +22,7 @@ $(UV_DONE): $(VENV)
 	$(TOUCH) $@
 
 run: $(UV_DONE)
-	$(UV) run --active prompter
+	$(UV) run --active prompter $(ARGS)
 
 mypy: $(UV_DONE)
 	$(UV) run --active mypy prompter

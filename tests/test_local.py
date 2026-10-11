@@ -49,9 +49,18 @@ def test_run_status_cd_and_env(tmp_path, capsys):
     assert run("/bin/sh -c 'kill -TERM $$'") == 143
     assert run("cd sub") == 0 and s.cwd == str(tmp_path / "work" / "sub")
     assert run("export GREETING=hi") == 0
+    assert run("export GREETING") == 0 and s.env["GREETING"] == "hi"  # no '=' keeps the value
     assert run('echo "$GREETING" && pwd') == 0
     out = capsys.readouterr().out
     assert "hi\n" in out and s.cwd in out
     assert run("cd nowhere") == 1 and "no such directory" in errors[-1]
     assert run("cd -") == 0 and s.cwd == str(tmp_path / "work")
     assert run("cd") == 0 and s.cwd == str(tmp_path)
+
+
+def test_multibyte_output_split_across_chunks(tmp_path, capsys):
+    console = Console(LocalShell(cwd=str(tmp_path)), history=None)
+    # 2000 lines of "é\n" = 6000 bytes; the 4096-byte read boundary falls inside an "é".
+    assert asyncio.run(console.execute("yes é | head -c 6000")) == 0
+    out = capsys.readouterr().out
+    assert "\ufffd" not in out and out.count("é") == 2000

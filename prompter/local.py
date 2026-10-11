@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import codecs
 import os
 import shlex
 import signal
@@ -52,6 +53,7 @@ class LocalShell(Backend):
             except OSError:
                 continue
             self.commands = frozenset(names)  # publish incrementally; slow dirs (WSL) come last
+        self.commands = frozenset(names)
 
     # -- paths ----------------------------------------------------------------
 
@@ -119,11 +121,14 @@ class LocalShell(Backend):
 
     def export(self, args: list[str], stderr: Writer) -> int:
         for arg in args:
-            key, _, value = arg.partition("=")
-            self.env[key] = value
+            key, has_value, value = arg.partition("=")
+            if has_value:
+                self.env[key] = value
         return 0
 
 
 async def _pump(stream: asyncio.StreamReader | None, write: Writer) -> None:
+    decode = codecs.getincrementaldecoder("utf-8")(errors="replace").decode
     while stream and (chunk := await stream.read(4096)):
-        write(chunk.decode(errors="replace"))
+        write(decode(chunk))
+    write(decode(b"", final=True))

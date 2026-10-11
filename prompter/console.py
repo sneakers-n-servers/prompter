@@ -1,8 +1,8 @@
-"""A batman-themed prompt_toolkit console in one file.
+"""A pretty prompt_toolkit console: batman or pure prompt, F5 cycles colour styles.
 
-To reuse: copy this file, subclass :class:`Backend` (only ``run`` is required)
-and call ``asyncio.run(Console(MyBackend()).run())``. ``local.py`` is a
-complete backend that drives the local ``/bin/sh``.
+To reuse: copy this file and ``themes.py``, subclass :class:`Backend` (only
+``run`` is required) and call ``asyncio.run(Console(MyBackend()).run())``.
+``local.py`` is a complete backend that drives the local ``/bin/sh``.
 """
 
 from __future__ import annotations
@@ -19,10 +19,12 @@ from prompt_toolkit.completion import CompleteEvent, Completer, Completion
 from prompt_toolkit.document import Document
 from prompt_toolkit.formatted_text import FormattedText, StyleAndTextTuples
 from prompt_toolkit.history import FileHistory
+from prompt_toolkit.key_binding import KeyBindings, KeyPressEvent
 from prompt_toolkit.lexers import Lexer
 from prompt_toolkit.patch_stdout import patch_stdout
 from prompt_toolkit.shortcuts import CompleteStyle
-from prompt_toolkit.styles import Style
+
+from prompter.themes import STYLES, build_style
 
 Writer = Callable[[str], None]
 
@@ -52,45 +54,18 @@ class Backend:
         return []
 
 
-# -- theme (port of oh-my-fish/theme-batman) ----------------------------------
+# -- prompt layouts --------------------------------------------------------------
 
-FST, SND, TRD, DIM = "#ffaa00", "#3366ff", "#ff0066", "#666666"
-ARROWS = {"ok": ("#333333", "#666666", "#aaaaaa"), "err": ("#660000", "#990000", "#cc0000")}
 
-STYLE = Style.from_dict(
-    {
-        "path.home": f"{FST} bold",
-        "path.sep": f"{SND} bold",
-        "path.base": f"{FST} bold",
-        **{f"arrow.{k}.{i}": f"{c} bold" for k, cs in ARROWS.items() for i, c in enumerate(cs)},
-        "dim": DIM,
-        "fst": f"{FST} bold",
-        "trd": f"{TRD} bold",
-        "stderr": "#cc0000",
-        "auto-suggestion": DIM,
-        "bottom-toolbar": f"bg:#1c1c1c {DIM} noreverse",
-        "bottom-toolbar.key": f"bg:#1c1c1c {FST} bold",
-        "bottom-toolbar.sep": f"bg:#1c1c1c {SND}",
-        "completion-menu": "bg:#1c1c1c #aaaaaa",
-        "completion-menu.completion.current": f"bg:{FST} #000000 bold",
-        "completion-menu.meta.completion": f"bg:#262626 {DIM}",
-        "completion-menu.meta.completion.current": f"bg:{FST} #333333",
-        "lexer.command.valid": f"{FST} bold",
-        "lexer.command.invalid": f"{TRD} bold",
-        "lexer.option": SND,
-        "lexer.variable": f"{SND} bold",
-        "lexer.string": "#aaaaaa",
-        "lexer.operator": f"{TRD} bold",
-        "lexer.comment": f"{DIM} italic",
-    }
-)
+def tilde(path: str, home: str | None, sep: str) -> str:
+    if home and (path == home or path.startswith(home.rstrip(sep) + sep)):
+        return "~" + path[len(home.rstrip(sep)) :]
+    return path
 
 
 def short_path(path: str, home: str | None, sep: str) -> str:
     """fish's ``prompt_pwd``: ``/home/me/dev/prompter`` -> ``~/d/prompter``."""
-    if home and (path == home or path.startswith(home.rstrip(sep) + sep)):
-        path = "~" + path[len(home.rstrip(sep)) :]
-    parts = path.split(sep)
+    parts = tilde(path, home, sep).split(sep)
     if len(parts) > 2:
         parts[1:-1] = [p[: 2 if p.startswith(".") else 1] for p in parts[1:-1]]
     return sep.join(parts)
@@ -118,6 +93,53 @@ def took(seconds: float) -> str:
     if seconds < 60:
         return f"{seconds:.1f}s"
     return f"{int(seconds) // 60}m{int(seconds) % 60:02d}s"
+
+
+def batman_prompt(c: Console) -> StyleAndTextTuples:
+    """oh-my-fish/theme-batman: ``^^/d/prompter>>> ``, arrows fade to red on failure."""
+    b = c.backend
+    path = styled_path(short_path(b.cwd, b.home, b.sep), b.sep) if b.cwd else []
+    kind = "err" if c.status else "ok"
+    return [*path, *[(f"class:arrow.{kind}.{i}", ">") for i in range(3)], ("", " ")]
+
+
+def batman_rprompt(c: Console) -> StyleAndTextTuples:
+    out: StyleAndTextTuples = []
+    if c.status:
+        out += [("class:dim", "("), ("class:trd", str(c.status)), ("class:dim", ") ")]
+    hh, mm, ss = datetime.now().strftime("%H %M %S").split()
+    out += [("class:dim", hh), ("class:fst", ":"), ("class:dim", mm), ("class:fst", ":")]
+    return [*out, ("class:dim", ss)]
+
+
+def human_time(seconds: float) -> str:
+    """pure's format: ``3s``, ``1m 3s``, ``2h 5s`` (zero units are skipped)."""
+    s = int(seconds)
+    parts = [(s // 3600, "h"), (s // 60 % 60, "m"), (s % 60, "s")]
+    return " ".join(f"{n}{unit}" for n, unit in parts if n or unit == "s")
+
+
+def pure_prompt(c: Console) -> StyleAndTextTuples:
+    """sindresorhus/pure: blank line; user@host (SSH only), path, time (>5s); then ``❯``."""
+    b = c.backend
+    out: StyleAndTextTuples = [("", "\n")]
+    if b.env.get("SSH_CONNECTION"):
+        out.append(("class:host", f"{b.env.get('USER', '')}@{b.host} "))
+    out.append(("class:path", tilde(b.cwd, b.home, b.sep)))
+    if c.took > 5:
+        out.append(("class:took", f" {human_time(c.took)}"))
+    return [*out, ("", "\n"), ("class:arrow.err" if c.status else "class:arrow.ok", "❯ ")]
+
+
+def pure_rprompt(c: Console) -> StyleAndTextTuples:
+    return [("class:status", f"✘ {c.status}")] if c.status else []
+
+
+Layout = Callable[["Console"], StyleAndTextTuples]
+PROMPTS: dict[str, tuple[Layout, Layout]] = {  # must match PROMPT_RULES in themes.py
+    "batman": (batman_prompt, batman_rprompt),
+    "pure": (pure_prompt, pure_rprompt),
+}
 
 
 # -- syntax highlighting --------------------------------------------------------
@@ -207,15 +229,26 @@ class Console:
     EXIT = frozenset({"exit", "quit"})
     HISTORY = Path.home() / ".prompter-history"
 
-    def __init__(self, backend: Backend, history: Path | None = HISTORY):
+    def __init__(
+        self,
+        backend: Backend,
+        prompt: str = "batman",
+        style: str = "batman",
+        history: Path | None = HISTORY,
+    ):
         self.backend = backend
+        self.prompt_name, self.style = prompt, style
         self.status = 0
         self.took = 0.0
+        self.prompt, self.rprompt = PROMPTS[prompt]
+        keys = KeyBindings()
+        keys.add("f5")(self.next_style)
         self.session: PromptSession[str] = PromptSession(
-            message=self.prompt,
-            rprompt=self.rprompt,
+            message=lambda: FormattedText(self.prompt(self)),
+            rprompt=lambda: FormattedText(self.rprompt(self)),
             bottom_toolbar=self.toolbar,
-            style=STYLE,
+            style=build_style(prompt, self.style),
+            key_bindings=keys,
             lexer=ShellLexer(self.is_command),
             completer=ShellCompleter(backend, self.EXIT),
             complete_style=CompleteStyle.MULTI_COLUMN,
@@ -225,6 +258,11 @@ class Console:
             refresh_interval=1.0,  # keeps the clock ticking
         )
 
+    def next_style(self, event: KeyPressEvent | None = None) -> None:
+        names = list(STYLES)
+        self.style = names[(names.index(self.style) + 1) % len(names)]
+        self.session.style = build_style(self.prompt_name, self.style)
+
     def is_command(self, name: str) -> bool | None:
         if name in self.EXIT:
             return True
@@ -232,43 +270,30 @@ class Console:
             return None
         return name in self.backend.commands
 
-    def prompt(self) -> FormattedText:
-        b = self.backend
-        kind = "err" if self.status else "ok"
-        path = styled_path(short_path(b.cwd, b.home, b.sep), b.sep) if b.cwd else []
-        return FormattedText(
-            [*path, *[(f"class:arrow.{kind}.{i}", ">") for i in range(3)], ("", " ")]
-        )
-
-    def rprompt(self) -> FormattedText:
-        out: StyleAndTextTuples = []
-        if self.status:
-            out += [("class:dim", "("), ("class:trd", str(self.status)), ("class:dim", ") ")]
-        hh, mm, ss = datetime.now().strftime("%H %M %S").split()
-        out += [("class:dim", hh), ("class:fst", ":"), ("class:dim", mm), ("class:fst", ":")]
-        return FormattedText([*out, ("class:dim", ss)])
-
     def toolbar(self) -> FormattedText:
         sep = ("class:bottom-toolbar.sep", "  ·  ")
         out: StyleAndTextTuples = [("class:bottom-toolbar.key", f" {self.backend.host}")]
         if self.backend.cwd:
             out += [sep, ("", self.backend.cwd)]
         out += [sep, ("", f"took {took(self.took)}"), sep]
-        out += [("class:bottom-toolbar.key", "Tab"), ("", " complete  ")]
+        out += [("class:bottom-toolbar.key", "F5"), ("", " next style  ")]
         return FormattedText([*out, ("class:bottom-toolbar.key", "^D"), ("", " quit ")])
 
     @staticmethod
     def stdout(text: str) -> None:
         print(text, end="", flush=True)
 
-    @staticmethod
-    def stderr(text: str) -> None:
-        print_formatted_text(FormattedText([("class:stderr", text)]), end="", style=STYLE)
+    def stderr(self, text: str) -> None:
+        fragments = FormattedText([("class:stderr", text)])
+        print_formatted_text(fragments, end="", style=self.session.style)
 
     async def execute(self, line: str) -> int:
         start = time.perf_counter()
         try:
             self.status = await self.backend.run(line, self.stdout, self.stderr)
+        except Exception as exc:  # a misbehaving backend should not take the console down
+            self.stderr(f"{type(exc).__name__}: {exc}\n")
+            self.status = 1
         finally:
             self.took = time.perf_counter() - start
         return self.status
@@ -282,7 +307,8 @@ class Console:
                     continue
                 except EOFError:
                     return
-                if line.split()[:1] and line.split()[0] in self.EXIT:
+                words = line.split()
+                if words and words[0] in self.EXIT:
                     return
-                if line and not line.startswith("#"):
+                if words and not line.startswith("#"):
                     await self.execute(line)
